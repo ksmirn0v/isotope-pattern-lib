@@ -2,5 +2,8 @@ __pycache__/
 artifacts/
 *.egg-info/
 .idea/
+.DS_Store
 .coverage
 .scannerwork/
+.venv/
+dist/

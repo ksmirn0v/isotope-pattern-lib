@@ -2,6 +2,7 @@ name: ci-branch
 env:
   SONARCLOUD_TASK_URL: https://sonarcloud.io/api/ce/task
   SONARCLOUD_PROJECT_STATUS_URL: https://sonarcloud.io/api/qualitygates/project_status
+  UV_PYTHON: "3.12"
 on:
   push:
     branches:
@@ -9,44 +10,41 @@ on:
       - '!master'
 jobs:
   tests:
-    runs-on: ubuntu-16.04
+    runs-on: ubuntu-latest
     steps:
       - name: checkout
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Python setup
-        uses: actions/setup-python@v2
+      - name: install uv
+        uses: astral-sh/setup-uv@v5
         with:
-          python-version: 3.7
-      - name: install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt -r requirements-test.txt
+          python-version: ${{ env.UV_PYTHON }}
+          enable-cache: true
       - name: running unit tests
         run: |
-          python -m pytest tests/unit --cov=isotope_pattern_lib --cov-report=xml:./artifacts/test-report/unit/coverage-report.xml
+          uv run --group test pytest tests/unit --cov=isotope_pattern_lib --cov-report=xml:./artifacts/test-report/unit/coverage-report.xml
       - name: running integration tests
         run: |
-          python -m pytest tests/integration --cov=isotope_pattern_lib --cov-report=xml:./artifacts/test-report/integration/coverage-report.xml
+          uv run --group test pytest tests/integration --cov=isotope_pattern_lib --cov-report=xml:./artifacts/test-report/integration/coverage-report.xml
       - name: saving artifacts
-        uses: actions/upload-artifact@v2
+        uses: actions/upload-artifact@v4
         with:
           name: coverage-report
           path: ./artifacts
   code-analysis:
     needs: tests
-    runs-on: ubuntu-16.04
+    runs-on: ubuntu-latest
     steps:
       - name: checkout
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
       - name: branch name extraction
         id: branch_extraction
         run: echo "##[set-output name=branch_name;]$(echo ${GITHUB_REF#refs/heads/})"
       - name: loading artifacts
-        uses: actions/download-artifact@v2
+        uses: actions/download-artifact@v4
         with:
           name: coverage-report
       - name: SonarCloud scan
@@ -54,29 +52,56 @@ jobs:
           GITHUB_TOKEN: ${{secrets.GITHUB_TOKEN}}
           SONAR_TOKEN: ${{secrets.SONARCLOUD_TOKEN}}
         run: |
-          wget https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-4.4.0.2170-linux.zip
-          unzip ./sonar-scanner-cli-4.4.0.2170-linux.zip
-          rm ./sonar-scanner-cli-4.4.0.2170-linux.zip
-          mv ./sonar-scanner-4.4.0.2170-linux /opt
-          mv /opt/sonar-scanner-4.4.0.2170-linux /opt/sonar-scanner
+          wget https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-8.1.0.6389-linux-x64.zip
+          unzip ./sonar-scanner-cli-8.1.0.6389-linux-x64.zip
+          rm ./sonar-scanner-cli-8.1.0.6389-linux-x64.zip
+          mv ./sonar-scanner-8.1.0.6389-linux-x64 /opt
+          mv /opt/sonar-scanner-8.1.0.6389-linux-x64 /opt/sonar-scanner
           /opt/sonar-scanner/bin/sonar-scanner \
             -Dsonar.organization=${{secrets.SONARCLOUD_ORGANIZATION}} \
             -Dsonar.projectKey=${{secrets.SONARCLOUD_PROJECT_KEY}} \
-            -Dsonar.sources=. \
+            -Dsonar.sources=isotope_pattern_lib \
+            -Dsonar.tests=tests \
             -Dsonar.host.url=https://sonarcloud.io \
             -Dsonar.python.coverage.reportPaths=test-report/**/coverage-report.xml \
             -Dsonar.exclusions=test-report/** \
             -Dsonar.branch.name=${{steps.branch_extraction.outputs.branch_name}}
-      - name: SonarCloud quality gate retrieval
-        id: quality_gate
+      - name: SonarCloud quality gate evaluation
+        env:
+          SONAR_TOKEN: ${{secrets.SONARCLOUD_TOKEN}}
         run: |
           taskId=$(awk -v FS="ceTaskId=" 'NF>1{print $2}' .scannerwork/report-task.txt)
           echo "taskId=${taskId}"
-          taskResponse=$(curl -u ${{secrets.SONARCLOUD_TOKEN}}: --location --request GET "${{env.SONARCLOUD_TASK_URL}}?id=$taskId")
-          qualityGateResponse=$(curl --location --request GET '${{env.SONARCLOUD_PROJECT_STATUS_URL}}?analysisId=$(fromJSON(taskResponse).task.analysisId)&projectKey=${{secrets.SONARCLOUD_PROJECT_KEY}}')
-          echo "::set-output name=qualityGateResponse::$qualityGateResponse"
-      - name: SonarCloud quality gate evaluation
-        if: ${{fromJSON(steps.quality_gate.outputs.qualityGateResponse).projectStatus.status == 'ERROR'}}
-        run: |
-          echo "The quality gate was not passed"
-          exit 1
+
+          status="PENDING"
+          for i in $(seq 1 30); do
+            taskResponse=$(curl -s -u "${SONAR_TOKEN}:" --location --request GET "${{env.SONARCLOUD_TASK_URL}}?id=${taskId}")
+            status=$(echo "$taskResponse" | jq -r '.task.status')
+            echo "CE task status: ${status}"
+            if [ "$status" = "SUCCESS" ] || [ "$status" = "FAILED" ] || [ "$status" = "CANCELED" ]; then
+              break
+            fi
+            sleep 5
+          done
+
+          if [ "$status" != "SUCCESS" ]; then
+            echo "SonarCloud analysis task did not complete successfully (status: ${status})"
+            echo "Full task response: ${taskResponse}"
+            exit 1
+          fi
+
+          analysisId=$(echo "$taskResponse" | jq -r '.task.analysisId')
+          echo "analysisId=${analysisId}"
+          qualityGateResponse=$(curl -s -u "${SONAR_TOKEN}:" --location --request GET "${{env.SONARCLOUD_PROJECT_STATUS_URL}}?analysisId=${analysisId}")
+          qualityGateStatus=$(echo "$qualityGateResponse" | jq -r '.projectStatus.status // empty')
+          echo "Quality gate status: ${qualityGateStatus:-<none>}"
+
+          if [ -z "$qualityGateStatus" ]; then
+            echo "Could not read quality gate status, full response: ${qualityGateResponse}"
+            exit 1
+          fi
+
+          if [ "$qualityGateStatus" = "ERROR" ]; then
+            echo "The quality gate was not passed"
+            exit 1
+          fi

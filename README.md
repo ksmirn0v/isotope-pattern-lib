@@ -5,7 +5,30 @@ of a given molecular formula.
 
 ## Requirements ##
 
-`python >= 3.7`
+`python >= 3.9`
+
+## Development ##
+
+The project uses [`uv`](https://docs.astral.sh/uv/) as its package manager.
+
+```
+uv sync --group test --group dev
+```
+
+Run the test suite (unit and integration tests are run as separate `pytest`
+invocations, so that mutated global state in one suite does not leak into the
+other):
+
+```
+uv run pytest tests/unit
+uv run pytest tests/integration
+```
+
+Build a distributable wheel/sdist:
+
+```
+uv build
+```
 
 ## Usage ##
 
