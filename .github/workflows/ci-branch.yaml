@@ -9,8 +9,12 @@ on:
       - '**'
       - '!master'
 jobs:
-  tests:
+  test-matrix:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.10", "3.11", "3.12"]
     steps:
       - name: checkout
         uses: actions/checkout@v4
@@ -19,19 +23,29 @@ jobs:
       - name: install uv
         uses: astral-sh/setup-uv@v5
         with:
-          python-version: ${{ env.UV_PYTHON }}
+          python-version: ${{ matrix.python-version }}
           enable-cache: true
       - name: running unit tests
         run: |
-          uv run --group test pytest tests/unit --cov=isotope_pattern_lib --cov-report=xml:./artifacts/test-report/unit/coverage-report.xml
+          uv run --python ${{ matrix.python-version }} --group test pytest tests/unit --cov=isotope_pattern_lib --cov-report=xml:./artifacts/test-report/unit/coverage-report.xml
       - name: running integration tests
         run: |
-          uv run --group test pytest tests/integration --cov=isotope_pattern_lib --cov-report=xml:./artifacts/test-report/integration/coverage-report.xml
+          uv run --python ${{ matrix.python-version }} --group test pytest tests/integration --cov=isotope_pattern_lib --cov-report=xml:./artifacts/test-report/integration/coverage-report.xml
       - name: saving artifacts
+        if: matrix.python-version == '3.12'
         uses: actions/upload-artifact@v4
         with:
           name: coverage-report
           path: ./artifacts
+  # Fan-in gate: matrix jobs report as "test-matrix (3.9)" etc, not a single
+  # "tests" check, which breaks branch protection rules pinned to that name.
+  # This job restores a single, stably-named required check.
+  tests:
+    needs: test-matrix
+    runs-on: ubuntu-latest
+    steps:
+      - name: all python version matrix legs passed
+        run: echo "All test-matrix legs passed"
   code-analysis:
     needs: tests
     runs-on: ubuntu-latest

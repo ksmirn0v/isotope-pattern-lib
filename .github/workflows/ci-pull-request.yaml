@@ -9,8 +9,29 @@ on:
       - master
     types: [opened, edited, synchronize, reopened]
 jobs:
-  tests:
+  validate-pr-title:
     runs-on: ubuntu-latest
+    outputs:
+      next_version: ${{ steps.compute.outputs.version }}
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: compute next version from PR title
+        id: compute
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          version=$(.github/scripts/compute-next-version.sh "$PR_TITLE")
+          echo "version=${version}" | tee -a "$GITHUB_OUTPUT"
+  test-matrix:
+    needs: validate-pr-title
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.10", "3.11", "3.12"]
     steps:
       - name: checkout
         uses: actions/checkout@v4
@@ -19,19 +40,29 @@ jobs:
       - name: install uv
         uses: astral-sh/setup-uv@v5
         with:
-          python-version: ${{ env.UV_PYTHON }}
+          python-version: ${{ matrix.python-version }}
           enable-cache: true
       - name: running unit tests
         run: |
-          uv run --group test pytest tests/unit --cov=isotope_pattern_lib --cov-report=xml:./artifacts/test-report/unit/coverage-report.xml
+          uv run --python ${{ matrix.python-version }} --group test pytest tests/unit --cov=isotope_pattern_lib --cov-report=xml:./artifacts/test-report/unit/coverage-report.xml
       - name: running integration tests
         run: |
-          uv run --group test pytest tests/integration --cov=isotope_pattern_lib --cov-report=xml:./artifacts/test-report/integration/coverage-report.xml
+          uv run --python ${{ matrix.python-version }} --group test pytest tests/integration --cov=isotope_pattern_lib --cov-report=xml:./artifacts/test-report/integration/coverage-report.xml
       - name: saving artifacts
+        if: matrix.python-version == '3.12'
         uses: actions/upload-artifact@v4
         with:
           name: coverage-report
           path: ./artifacts
+  # Fan-in gate: matrix jobs report as "test-matrix (3.9)" etc, not a single
+  # "tests" check, which breaks branch protection rules pinned to that name.
+  # This job restores a single, stably-named required check.
+  tests:
+    needs: test-matrix
+    runs-on: ubuntu-latest
+    steps:
+      - name: all python version matrix legs passed
+        run: echo "All test-matrix legs passed"
   code-analysis:
     needs: tests
     runs-on: ubuntu-latest
@@ -102,3 +133,77 @@ jobs:
             echo "The quality gate was not passed"
             exit 1
           fi
+  e2e-publish:
+    needs: [tests, validate-pr-title]
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+      - name: install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: ${{ env.UV_PYTHON }}
+          enable-cache: true
+      - name: compute unique dev version
+        id: version
+        env:
+          NEXT_VERSION: ${{ needs.validate-pr-title.outputs.next_version }}
+        run: |
+          dev_version="${NEXT_VERSION}.dev${{ github.run_id }}${{ github.run_attempt }}"
+          echo "version=${dev_version}" | tee -a "$GITHUB_OUTPUT"
+          sed -i "s/^version = \".*\"/version = \"${dev_version}\"/" pyproject.toml
+      - name: build package
+        run: uv build
+      - name: publish to TestPyPI
+        env:
+          UV_PUBLISH_TOKEN: ${{ secrets.TEST_PYPI_TOKEN }}
+        run: uv publish --publish-url https://test.pypi.org/legacy/ dist/*
+  e2e-verify:
+    needs: e2e-publish
+    runs-on: ubuntu-latest
+    steps:
+      # Sparse-checkout only `tests/`: `isotope_pattern_lib` must NOT be present
+      # in the working tree here, otherwise `python -m pytest` would resolve
+      # imports to the local source instead of the package installed from
+      # TestPyPI below, silently defeating this job's purpose.
+      - name: checkout tests only
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            tests
+          sparse-checkout-cone-mode: true
+      - name: install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: ${{ env.UV_PYTHON }}
+          enable-cache: true
+      - name: create e2e virtual environment
+        run: uv venv .e2e-venv
+      - name: install package from TestPyPI
+        env:
+          VERSION: ${{ needs.e2e-publish.outputs.version }}
+        run: |
+          for attempt in $(seq 1 5); do
+            if uv pip install --python .e2e-venv \
+              --index-url https://test.pypi.org/simple/ \
+              --extra-index-url https://pypi.org/simple/ \
+              "isotope-pattern-lib==${VERSION}"; then
+              exit 0
+            fi
+            echo "package not yet available on TestPyPI, retrying in 15s (attempt ${attempt}/5)"
+            sleep 15
+          done
+          echo "failed to install isotope-pattern-lib==${VERSION} from TestPyPI"
+          exit 1
+      - name: install e2e test dependencies
+        run: uv pip install --python .e2e-venv pytest pytest-bdd pytest-cov pyyaml
+      - name: running e2e tests against published artifact
+        run: |
+          .e2e-venv/bin/python -m pytest tests/integration --cov=isotope_pattern_lib --cov-report=xml:./artifacts/test-report/e2e/coverage-report.xml
+      - name: saving e2e artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-coverage-report
+          path: ./artifacts
