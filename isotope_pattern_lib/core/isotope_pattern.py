@@ -1,5 +1,5 @@
 import itertools
-from typing import List
+from typing import List, Any, Generator
 
 from scipy.stats import multinomial
 
@@ -11,7 +11,7 @@ from isotope_pattern_lib.types.types import (
 from isotope_pattern_lib.utils import utils
 
 
-def compute_isotope_pattern(formula: MolecularFormula) -> List[IsotopeFormula]:
+def compute_isotope_pattern(formula: MolecularFormula) -> Generator[IsotopeFormula, Any, None]:
 
     element_isotope_formulas = {}
     for element, count in formula.elements.items():

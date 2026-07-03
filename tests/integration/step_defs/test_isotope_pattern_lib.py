@@ -5,6 +5,7 @@ import pytest
 import yaml
 from pytest_bdd import (
     given,
+    parsers,
     scenario,
     then
 )
@@ -31,7 +32,7 @@ def test__should_return_correct_pattern__when_settings_are_customized_and_formul
     pass
 
 
-@given('Molecular "<formula>" as a raw string')
+@given(parsers.parse('Molecular "{formula}" as a raw string'), target_fixture='molecular_formula')
 def molecular_formula(formula: str) -> str:
 
     return formula
@@ -43,13 +44,13 @@ def settings():
     api.set_parser(path.join('tests', 'data', 'integration', 'config.yaml'))
 
 
-@given('The pattern computation is triggered')
+@given('The pattern computation is triggered', target_fixture='pattern')
 def pattern(molecular_formula: str) -> List[IsotopeFormula]:
 
     return api.compute_isotope_pattern(formula_string=molecular_formula)
 
 
-@then('The resulting pattern corresponds to the one in "<file>"')
+@then(parsers.parse('The resulting pattern corresponds to the one in "{file}"'))
 def assert_pattern_equality(pattern: List[IsotopeFormula], file: str):
 
     with open(path.join('tests', 'data', 'integration', file), 'r') as file:

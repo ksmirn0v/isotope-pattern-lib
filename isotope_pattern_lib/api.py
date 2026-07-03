@@ -1,5 +1,4 @@
-import os
-import pkg_resources
+from importlib import resources
 from typing import List
 
 from isotope_pattern_lib.core import isotope_pattern
@@ -8,12 +7,14 @@ from isotope_pattern_lib.types.settings import Settings
 from isotope_pattern_lib.types.types import IsotopeFormula
 
 
-parser = MolecularFormulaParser(
-    settings=Settings.parse_from_file(pkg_resources.resource_filename(
-        'isotope_pattern_lib',
-        os.path.join('resources', 'config.yaml')
-    ))
-)
+def _default_settings() -> Settings:
+
+    config = resources.files('isotope_pattern_lib').joinpath('resources', 'config.yaml')
+    with resources.as_file(config) as config_path:
+        return Settings.parse_from_file(path=str(config_path))
+
+
+parser = MolecularFormulaParser(settings=_default_settings())
 
 
 def set_parser(config_path: str):
