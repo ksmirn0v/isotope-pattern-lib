@@ -30,6 +30,25 @@ Build a distributable wheel/sdist:
 uv build
 ```
 
+## Releasing ##
+
+Every pull request title into `master` must contain exactly one of
+`[MAJOR]`, `[MINOR]`, `[PATCH]`. This determines the version bump that will
+be applied on merge, relative to the latest `X.Y.Z` git tag:
+
+- `[MAJOR]` bumps the first number, resetting the rest to zero. If no tag
+  exists yet, this creates the first release, `1.0.0`.
+- `[MINOR]` bumps the second number, resetting the patch number to zero.
+- `[PATCH]` bumps the third number.
+
+`[MINOR]`/`[PATCH]` require an existing tag to bump from — a PR using either
+of them is invalid until a `[MAJOR]` release has been made at least once.
+
+On every PR, CI computes this future version and publishes a `.devN` build
+of it to [test.pypi.org](https://test.pypi.org) for end-to-end verification.
+On merge to `master`, CI creates the git tag and publishes that exact
+version to [pypi.org](https://pypi.org).
+
 ## Usage ##
 
 Although any of the classes/functions can be used independently,
@@ -51,7 +70,7 @@ The call is optional. If no call is conducted, a default parser is used.
 
 ---
 ```
-def compute_isotope_pattern(formula_string: str)
+api.compute_isotope_pattern(formula_string: str)
 ```
 The call computes isotope pattern of a given molecular formula, represented
 as a string `formula_string` (_e.g._ `C2H5OH`).

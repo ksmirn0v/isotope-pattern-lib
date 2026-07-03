@@ -8,8 +8,12 @@ on:
     branches:
       - master
 jobs:
-  tests:
+  test-matrix:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.10", "3.11", "3.12"]
     steps:
       - name: checkout
         uses: actions/checkout@v4
@@ -18,19 +22,29 @@ jobs:
       - name: install uv
         uses: astral-sh/setup-uv@v5
         with:
-          python-version: ${{ env.UV_PYTHON }}
+          python-version: ${{ matrix.python-version }}
           enable-cache: true
       - name: running unit tests
         run: |
-          uv run --group test pytest tests/unit --cov=isotope_pattern_lib --cov-report=xml:./artifacts/test-report/unit/coverage-report.xml
+          uv run --python ${{ matrix.python-version }} --group test pytest tests/unit --cov=isotope_pattern_lib --cov-report=xml:./artifacts/test-report/unit/coverage-report.xml
       - name: running integration tests
         run: |
-          uv run --group test pytest tests/integration --cov=isotope_pattern_lib --cov-report=xml:./artifacts/test-report/integration/coverage-report.xml
+          uv run --python ${{ matrix.python-version }} --group test pytest tests/integration --cov=isotope_pattern_lib --cov-report=xml:./artifacts/test-report/integration/coverage-report.xml
       - name: saving artifacts
+        if: matrix.python-version == '3.12'
         uses: actions/upload-artifact@v4
         with:
           name: coverage-report
           path: ./artifacts
+  # Fan-in gate: matrix jobs report as "test-matrix (3.9)" etc, not a single
+  # "tests" check, which breaks branch protection rules pinned to that name.
+  # This job restores a single, stably-named required check.
+  tests:
+    needs: test-matrix
+    runs-on: ubuntu-latest
+    steps:
+      - name: all python version matrix legs passed
+        run: echo "All test-matrix legs passed"
   code-analysis:
     needs: tests
     runs-on: ubuntu-latest
@@ -101,3 +115,67 @@ jobs:
             echo "The quality gate was not passed"
             exit 1
           fi
+  tag-release:
+    needs: [tests, code-analysis]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.tag.outputs.version }}
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: find merged PR title
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          title=$(gh api "repos/${{ github.repository }}/commits/${{ github.sha }}/pulls" --jq '.[0].title // empty')
+          if [ -z "$title" ]; then
+            echo "No pull request associated with this push; skipping release tagging" >&2
+            exit 1
+          fi
+          echo "title=${title}" | tee -a "$GITHUB_OUTPUT"
+      - name: compute next version
+        id: version
+        env:
+          PR_TITLE: ${{ steps.pr.outputs.title }}
+        run: |
+          version=$(.github/scripts/compute-next-version.sh "$PR_TITLE")
+          echo "version=${version}" | tee -a "$GITHUB_OUTPUT"
+      - name: create and push release tag
+        id: tag
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "${VERSION}" -m "Release ${VERSION}"
+          git push origin "${VERSION}"
+          echo "version=${VERSION}" | tee -a "$GITHUB_OUTPUT"
+  publish:
+    needs: tag-release
+    runs-on: ubuntu-latest
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.tag-release.outputs.version }}
+      - name: install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: ${{ env.UV_PYTHON }}
+          enable-cache: true
+      - name: set release version
+        env:
+          VERSION: ${{ needs.tag-release.outputs.version }}
+        run: |
+          sed -i "s/^version = \".*\"/version = \"${VERSION}\"/" pyproject.toml
+      - name: build package
+        run: uv build
+      - name: publish to PyPI
+        env:
+          UV_PUBLISH_TOKEN: ${{ secrets.PYPI_TOKEN }}
+        run: uv publish dist/*
